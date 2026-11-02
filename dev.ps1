@@ -215,6 +215,21 @@ if (-not (Test-Path (Join-Path $FrontendDir 'node_modules'))) {
     Log-Ok 'frontend deps installed'
 }
 
+# ===== 3.5 TLS CA bundle =====
+# 后端 httpx / OpenAI SDK 默认只信任 certifi 自带的根证书; 本机(企业网络、安全
+# 软件、代理)安装的可信根证书只存在于 Windows 证书存储, 不合并会让 HTTPS 报
+# CERTIFICATE_VERIFY_FAILED —— 上层表现为「AI 服务连接失败, 请检查 AI Base URL / 网络」。
+# 只在 bundle 缺失时生成一次(证书存储变更时删掉该文件即会重建), 随后通过
+# SSL_CERT_FILE 注入后端进程; 生成失败不阻断启动, 回退 certifi 默认行为。
+$CaBundle = Join-Path $env:LOCALAPPDATA 'TSP\ca-bundle.pem'
+if (-not (Test-Path $CaBundle)) {
+    Log-Info "generating TLS CA bundle (certifi + Windows store): $CaBundle"
+    Push-Location $BackendDir
+    try { & uv run --no-sync python (Join-Path $Root 'scripts\gen_ca_bundle.py') $CaBundle } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { Log-Warn 'CA bundle 生成失败, 回退 certifi 默认证书' }
+}
+if (Test-Path $CaBundle) { $env:SSL_CERT_FILE = $CaBundle }
+
 # ===== 4. Banner (ASCII so it renders on any codepage) =====
 Write-Host ''
 Write-Host '+----------------------------------------------+' -ForegroundColor Blue
