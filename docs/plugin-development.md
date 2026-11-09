@@ -35,15 +35,24 @@ check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可�
 datasets: [realtime]                     # 支持: daily/adj_factor/minute/realtime/depth5/financial
 api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
-description: "数据源描述"
+description: |
+  ## 接入说明
+  使用 **个人 API Key** 获取数据。
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
-homepage: "https://example.com"          # (可选)官网/申请地址, 显示在设置页 Key 配置说明中
+homepage: "https://example.com"          # (可选)官网/文档地址, 显示在插件详情中
+homepage_label: "访问官网"                 # (可选)链接文字, 缺省为「显示名 官网」
 billing: points                          # (可选)计费标识: "points" → 设置页能力芯片/适配行标注「积分」
 billing_note: "消耗与频率/范围相关,间隔越短越高"  # (可选)计费提示: 设置页按警示框展示
 usage_notes:                             # (可选)使用要点: 各能力规模/节奏, 详情卡以列表展示
-  - "实时快照: 600 只/批, 全市场一轮约 10 批"
-key_manage_url: "https://example.com/me" # (可选)Key/账务管理页, 显示在设置页 Key 配置区(如积分明细入口)
+  - "实时快照: **600 只/批**, 全市场一轮约 10 批"
+  - "请先阅读 [接口文档](https://example.com/docs)。"
+key_manage_url: "https://example.com/me" # (可选)Key/账务管理页, 显示在插件详情中
+key_manage_label: "获取 Key / 查看用量"    # (可选)缺省为「管理 Key / 查看账户用量」
 ```
+
+`homepage_label`、`key_manage_label` 为可选纯文本，最多 200 字符；不填或留空时使用默认文案，没有对应 URL 时不显示入口。外部安装包的 `homepage`、`key_manage_url` 必须使用 HTTPS。链接在「数据源」与「已安装扩展」详情中展示，不依赖 `api_key_env` 或 Key 配置状态。新增字段不改变插件 API 版本，旧清单继续兼容。
+
+这两处详情及数据源安装预览的 `description`、详情中的 `usage_notes` 支持基础 Markdown：1–4 级标题、加粗、行内代码、无序/有序列表、引用、分隔线、表格和 HTTP/HTTPS 链接。YAML 多行正文可用 `|` 编写；名称、按钮与链接文案保持纯文本。当前不是完整 GFM，不支持图片、代码围栏或原始 HTML；原始 HTML 和不安全协议链接只显示为文字，不会执行。
 
 只声明真实提供的数据集;未声明的数据集 `provider_has_dataset` 返回 False,自动回退
 TickFlow。不要声明做不了的数据集(粒度含义见下文"能力声明的粒度")。
@@ -170,11 +179,18 @@ class MyProvider:
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
 
+    def get_realtime_symbols(self, symbols: list[str], *, asset_type="stock") -> list[dict] | None:
+        """(可选)补拉全市场快照未覆盖的自选/详情股票或 ETF，字段同 realtime。
+        未实现时不补拉；失败返回 None，成功无数据返回 []，不得内部静默跨源。"""
+
     def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
         """(可选)指数实时快照 → list[dict], 行字段与 get_realtime 一致。
         A 股快照普遍不含指数(fuyao 的指数在独立端点); 声明 realtime 的源
         强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败返回 None,
         成功但无数据返回 []。"""
+
+    # symbols now includes saved watchlist indices and visible detail leases,
+    # in addition to the core indices, benchmarks and enabled monitoring rules.
 
     def get_depth_batch(self, symbols: list[str]) -> dict[str, dict]:
         """(声明 depth5 时实现)五档盘口, 返回以 symbol 为键的标准盘口字典。"""
@@ -266,6 +282,23 @@ provider 不应自行切换或回退到其他数据源。
 确保最终 `cur == total`。
 
 ### get_realtime 行字段
+
+自选和当前详情的行情需求由同一个 `QuoteService` 合并去重，页面不自行启动行情轮询。
+TickFlow 全市场快照未覆盖的自选/详情标的按码补拉（包括未开启全量 ETF 拉取时的少量 ETF）；
+指数通过既有 `get_realtime_indices` 补充。自定义源未提供某个标的时保留有效旧数据并显示日期/过期状态，
+不把历史日K当实时快照，不为补齐行情静默切换数据源。显式选择的实时源未加载或未声明 `realtime` 时同样不回退。
+
+详情使用 `PUT /api/intraday/subscriptions/{client_id}` 登记 `{ "symbols": ["000985.SH"] }`，
+每个租约最多 64 只、90 秒有效；`DELETE` 释放，页面约每 20 秒续租，隐藏窗口停止续租。
+接口只登记需求，不立即取数，不改变行情总开关，也不写入用户配置；服务端重启后页面续租恢复。
+多个窗口的重叠标的由同一个行情工作线程按集合拉取，手动刷新与后台轮询复用同轮结果。
+该去重范围为单个后端进程（默认部署）；多个后端进程/副本需要独立的集中行情工作进程。
+
+自选行和日K详情新增可选的 `quote_freshness` 对象，包含 `state`、`message`、`data_date`、
+`quote_ts`（毫秒，可空）、`checked_at`、`max_age_ms`。状态包括 `live`、`delayed`、`stale`、
+`historical`、`unknown`、`missing`、`paused`、`disabled`。日期和时间按标的判断，不用资产大类日期替代；
+未提供时间戳的旧数据保持可读，标记为时间未知，不伪造实时性。休市、盘前、午休和收盘按北京时间边界判断。
+原响应字段、历史 Parquet 和用户配置保持兼容；提示信息不落盘。
 
 | 字段 | 必需 | 契约 |
 | --- | --- | --- |
